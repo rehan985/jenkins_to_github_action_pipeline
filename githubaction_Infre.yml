@@ -1,0 +1,158 @@
+name: Terraform Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      project:
+        description: 'Project/team to update'
+        required: true
+        default: 'reprocessing'
+        type: choice
+        options:
+          - reprocessing
+          - stats_dashboard
+      action:
+        description: 'Terraform action'
+        required: true
+        default: 'apply'
+        type: choice
+        options:
+          - apply
+          - destroy
+      layer:
+        description: 'Infra layer to update'
+        required: true
+        default: 'stats-dashboard'
+        type: choice
+        options:
+          - stats-dashboard
+          - video-uploader
+          - cluster
+          - compute
+          - networking
+          - rds
+          - sftp
+      env:
+        description: 'Environment (workspace) to deploy to'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - stage
+          - prod
+      aws_region:
+        description: 'AWS region to deploy to'
+        required: true
+        default: 'us-east-1'
+        type: choice
+        options:
+          - us-east-1
+          - ap-northeast-1
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.3.7
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/terraform-role
+          role-session-name: aws-role
+          aws-region: eu-west-1
+
+      - name: Initialize Terraform
+        run: |
+          export PATH="/opt/hostedtoolcache/terraform/1.3.7/x64/bin:$PATH"
+          cd ${{ github.event.inputs.project }}/${{ github.event.inputs.layer }}
+          terraform init -upgrade
+          tf_workspace="dev"
+          case "${{ github.event.inputs.env }}" in
+            dev)
+              tf_workspace="dev"
+              [[ "${{ github.event.inputs.aws_region }}" == "ap-northeast-1" ]] && tf_workspace="dev-apac"
+              ;;
+            stage)
+              tf_workspace="stage"
+              [[ "${{ github.event.inputs.aws_region }}" == "ap-northeast-1" ]] && tf_workspace="st-apac"
+              ;;
+            prod)
+              tf_workspace="prod"
+              [[ "${{ github.event.inputs.aws_region }}" == "ap-northeast-1" ]] && tf_workspace="pr-apac"
+              ;;
+          esac
+          terraform workspace select $tf_workspace || terraform workspace new $tf_workspace
+          terraform workspace show
+
+      - name: Plan Terraform
+        if: ${{ github.event.inputs.action == 'plan' || github.event.inputs.action == 'destroy' }}
+        uses: HawkEyeInnovations/GithubSharedWorkflows/.github/workflows/terraform-plan.yml@v0.0.41
+        with:
+          working_directory: ${{ github.event.inputs.project }}/${{ github.event.inputs.layer }}
+          aws_region: ${{ github.event.inputs.aws_region }}
+          aws_account_id: ${{ github.event.inputs.env == 'dev' && '682352645723' || github.event.inputs.env == 'prod' && '682171097471' || '682352645723' }}
+          aws_role_session_name: gha-plan-baseball-infra
+          var_file: ../${{ github.event.inputs.env }}.tfvars
+          workspace: ${{ github.event.inputs.env }}
+          create_workspace_if_not_exists: true
+          run_checkov: true
+          checkov_soft_fail: true
+          run_tflint: true
+          plan_options: ${{ github.event.inputs.action == 'destroy' && '-destroy -detailed-exitcode' || '' }}
+        secrets: inherit
+        continue-on-error: true
+
+      - name: Check Plan Status
+        run: |
+          if [[ ${{ steps.plan.outcome }} == "failure" ]]; then
+            echo "Terraform plan failed, please check console output"
+            exit 1
+          fi
+
+      - name: Wait for Approval
+        if: ${{ github.event.inputs.action == 'apply' }}
+        uses: hmarr/auto-approve-action@v2
+        with:
+          pull-request-number: ${{ github.event.inputs.pull_request_number }}
+
+  apply:
+    name: Deploy Environment
+    if: ${{ github.event.inputs.action == 'apply' }}
+    uses: HawkEyeInnovations/GithubSharedWorkflows/.github/workflows/terraform-apply.yml@v0.0.41
+    with:
+      working_directory: ${{ github.event.inputs.project }}/${{ github.event.inputs.layer }}
+      aws_region: ${{ github.event.inputs.aws_region }}
+      aws_account_id: ${{ github.event.inputs.env == 'dev' && '682352645723' || github.event.inputs.env == 'prod' && '682171097471' || '682352645723' }}
+      aws_role_session_name: gha-apply-baseball-infra
+      var_file: ../${{ github.event.inputs.env }}.tfvars
+      workspace: ${{ github.event.inputs.env }}
+      auto_approve: true
+    secrets: inherit
+
+  destroy:
+    name: Destroy Environment
+    if: ${{ github.event.inputs.action == 'destroy' }}
+    run: |
+      terraform destroy -auto-approve -var-file=../${{ github.event.inputs.env }}.tfvars -compact-warnings
+    working-directory: ${{ github.event.inputs.project }}/${{ github.event.inputs.layer }}
+    continue-on-error: false
+    env:
+      AWS_REGION: ${{ github.event.inputs.aws_region }}
+      AWS_ACCOUNT_ID: ${{ github.event.inputs.env == 'dev' && '682352645723' || github.event.inputs.env == 'prod' && '682171097471' || '682352645723' }}
+      AWS_ROLE_SESSION_NAME: gha-destroy-baseball-infra
