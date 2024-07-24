@@ -1,0 +1,81 @@
+name: Pulsar Rebuild Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.5.7
+
+      - name: Set up environment
+        id: setup_env
+        run: |
+          echo "Setting up environment variables..."
+          vars=$(cat $GITHUB_WORKSPACE/BDP/terraform/conf/${{ github.event.inputs.bdp_workspace }}.yml)
+          resetVars=$(cat $GITHUB_WORKSPACE/BDP/Pulsar/ansible/cluster-rebuild/conf/${{ github.event.inputs.bdp_workspace }}.yml)
+          echo "vars=${vars}" >> $GITHUB_ENV
+          echo "resetVars=${resetVars}" >> $GITHUB_ENV
+          echo "bdp_workspace=${{ github.event.inputs.bdp_workspace }}" >> $GITHUB_ENV
+          echo "rebuild_pulsar=${{ github.event.inputs.rebuild_pulsar }}" >> $GITHUB_ENV
+
+      - name: Rebuild Pulsar
+        if: ${{ env.rebuild_pulsar == 'yes' }}
+        run: |
+          echo "Rebuilding Pulsar cluster..."
+          echo "
+          pulsar_internal_nlb: ${resetVars.pulsar_internal_nlb}
+          pulsar_jwt_bdp_admin_token: ${vars.pulsar_jwt_bdp_admin_token}
+          environment_name: ${vars.workspace_name}
+          aws_s3_tracking_bucket_region: ${vars.aws_s3_tracking_bucket_region}
+          aws_s3_tracking_bucket: ${vars.aws_s3_tracking_bucket}
+          tracking_sink_version: ${vars.tracking_sink_version}
+          tracking_sink_count: ${vars.tracking_sink_count}
+          segment_function_version: ${vars.segment_function_version}
+          segment_function_count: ${vars.segment_function_count}
+          aws_region: ${vars.aws_region}
+          aws_dynamo_ttlSeconds: ${vars.aws_dynamo_ttlSeconds}
+          " > $GITHUB_WORKSPACE/BDP/Pulsar/ansible/cluster-rebuild/vars/variables.yml
+
+          echo "${SSH_PRIVATE_KEY}" > $GITHUB_WORKSPACE/BDP/Pulsar/ansible/id_rsa
+          chmod 600 $GITHUB_WORKSPACE/BDP/Pulsar/ansible/id_rsa
+
+          docker build -t hawk-eye/ansible $GITHUB_WORKSPACE/BDP/Pulsar/ansible
+
+          docker run --name=github-${{ github.run_number }} -it --volume $GITHUB_WORKSPACE/BDP/Pulsar/ansible:/ansible/playbooks hawk-eye/ansible ansible-playbook -v --user ec2-user --inventory playbooks/cluster-rebuild/inventory/${{ github.event.inputs.bdp_workspace }}-hosts.yml playbooks/cluster-rebuild/rebuild-pulsar.yml
+
+          exitCode=$(docker wait github-${{ github.run_number }})
+          ansibleLogs=$(docker logs github-${{ github.run_number }})
+          echo "${ansibleLogs}" > $GITHUB_WORKSPACE/BDP/ansible.log
+          docker rm -v github-${{ github.run_number }}
+          if [[ "${exitCode}" != "0" ]]; then
+            echo "Pulsar rebuild failed, check ansible.log in the workspace"
+            exit 1
+          fi
+
+      - name: Notify Success on Slack
+        if: success()
+        run: |
+          curl -X POST --data-urlencode "payload={\"text\": \"Successful: Job '${{ github.job }} [${{ github.run_number }}]' to 'rebuild_pulsar' (${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\"}" ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Notify Failure on Slack
+        if: failure()
+        run: |
+          curl -X POST --data-urlencode "payload={\"text\": \"Failed: Job '${{ github.job }} [${{ github.run_number }}]' to 'rebuild_pulsar' (${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\"}" ${{ secrets.SLACK_WEBHOOK_URL }}
