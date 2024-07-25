@@ -24,6 +24,7 @@ on:
         options:
           - apply
           - destroy
+          - plan
       deploy_pulsar:
         description: 'Whether to (re-)deploy Pulsar. Not recommended when upgrading an existing environment - if doing so, stop all BDP & Pulsar services beforehand.'
         required: true
@@ -34,14 +35,6 @@ on:
           - yes
     
 
-      project:
-        description: 'Input the project you would like to deploy.'
-        required: true
-        type: string
-      stack:
-        description: 'Input the stack you would like to deploy.'
-        required: true
-        type: string
       ansible_dir:
         description: 'Path to Ansible directory'
         required: true
@@ -114,8 +107,8 @@ jobs:
           vars_to_remove="aws_account workspace_name aws_s3_tracking_bucket_region pulsar_jwt_symmetric_key pulsar_jwt_proxy_admin_token pulsar_jwt_broker_admin_token pulsar_jwt_fw_admin_token pulsar_jwt_internal_admin_token pulsar_manager_admin_password tracking_sink_version tracking_sink_count segment_function_version segment_function_count datadog_global_processing_rules"
           filtered_vars=$(echo $vars | jq 'del(.[] | select(index($vars_to_remove) != null))')
           echo $filtered_vars | jq '.' > BDP/terraform/terraform.tfvars.json
-
-      - name: Terraform Plan
+                     
+      - name: Terraform plan
         if: ${{ github.event.inputs.action == 'plan' }}
         needs: get_workspace
         uses: ./.github/workflows/plan.yaml
@@ -126,7 +119,7 @@ jobs:
             aws_role_session_name: gha-${{ needs.workspace.outputs.tf_workspace }}-deployTDP-${{ inputs.deployment_target }}
         secrets: inherit
 
-      - name: Terraform init and plan
+      - name: Terraform 
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -140,7 +133,7 @@ jobs:
         if: env.plan_status == 2
         uses: hmarr/auto-approve-action@v2
 
-      - name: Terraform apply/destroy
+      - name: Terraform apply
         if: env.plan_status == 2
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -169,7 +162,7 @@ jobs:
             terraform workspace delete ${{ vars.workspace_name }}
           fi
  
-      - name: Plan Terraform
+      - name: destroy Terraform
         if: ${{ github.event.inputs.action == 'destroy' }}
         uses: HawkEyeInnovations/GithubSharedWorkflows/.github/workflows/terraform-plan.yml@v0.0.41
         with:
@@ -186,10 +179,10 @@ jobs:
           plan_options: ${{ github.event.inputs.action == 'destroy' && '-destroy -detailed-exitcode' || '' }}
         secrets: inherit
         continue-on-error: true
-
+      
       - name: Deploy Pulsar
         if: github.event.inputs.deploy_pulsar == 'yes' && github.event.inputs.action == 'apply' && env.plan_status == 2
-        uses: ./.github/actions/deploy-pulsar
+        uses: HawkEyeInnovations/GithubSharedWorkflows/.github/workflows/deploy-pulsar.yml
         with:
           tf_workspace: ${{ inputs.tf_workspace }}
           ansible_dir: ${{ inputs.ansible_dir }}
