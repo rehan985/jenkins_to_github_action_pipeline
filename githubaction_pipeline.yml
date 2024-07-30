@@ -24,6 +24,7 @@ on:
         options:
           - apply
           - destroy
+          - plan 
       deploy_pulsar:
         description: 'Whether to (re-)deploy Pulsar. Not recommended when upgrading an existing environment - if doing so, stop all BDP & Pulsar services beforehand.'
         required: true
@@ -60,6 +61,18 @@ jobs:
           filtered_vars=$(echo $vars | jq 'del(.[] | select(index($vars_to_remove) != null))')
           echo $filtered_vars | jq '.' > BDP/terraform/terraform.tfvars.json
 
+      - name: Terraform Plan
+        if: ${{ github.event.inputs.action == 'plan' }}
+        needs: get_workspace
+        uses: ./.github/workflows/plan.yaml
+          with:
+            tf_workspace: ${{ needs.get_workspace.outputs.tf_workspace }}
+            common_vars_file: ./TDP/common_vars.json
+            tf_dir_path: ./TDP/AWS/terraform/${{ inputs.deployment_target }}
+            aws_role_session_name: gha-${{ needs.workspace.outputs.tf_workspace }}-deployTDP-${{ inputs.deployment_target }}
+        secrets: inherit
+
+      
       - name: Terraform init and plan
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
