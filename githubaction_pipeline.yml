@@ -24,7 +24,6 @@ on:
         options:
           - apply
           - destroy
-          - plan
       deploy_pulsar:
         description: 'Whether to (re-)deploy Pulsar. Not recommended when upgrading an existing environment - if doing so, stop all BDP & Pulsar services beforehand.'
         required: true
@@ -33,57 +32,10 @@ on:
         options:
           - no
           - yes
-    
-
-      ansible_dir:
-        description: 'Path to Ansible directory'
-        required: true
-        type: string
-      ansible_hosts:
-        description: 'Ansible Hosts'
-        required: true
-        type: string
-      pulsar_service_url:
-        description: 'Pulsar Service URL'
-        required: true
-        type: string
-      pulsar_http_url:
-        description: 'Pulsar HTTP URL'
-        required: true
-        type: string
-      environment_type:
-        description: 'Environment Name'
-        required: true
-        type: string
-      aws_s3_events_bucket:
-        description: 'S3 events bucket'
-        required: true
-        type: string
-      aws_s3_events_bucket_region:
-        description: 'S3 events bucket region'
-        required: true
-        type: string        
-      aws_s3_tracking_bucket:
-        description: 'S3 tracking bucket'
-        required: true
-        type: string
-      aws_s3_tracking_bucket_region:
-        description: 'S3 tracking bucket region'
-        required: true
-        type: string
-      pulsar_sinks_version: 
-        description: 'Pulsar sinks version'
-        required: true
-        type: string
-
-
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
-    env:
-      TF_VERSION: 1.5.7
 
     steps:
       - name: Checkout repository
@@ -92,7 +44,7 @@ jobs:
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v2
         with:
-          terraform_version: ${{ env.TF_VERSION }}
+          terraform_version: ${{ secrets.TF_VERSION }}
 
       - name: Load config
         id: load_config
@@ -107,19 +59,8 @@ jobs:
           vars_to_remove="aws_account workspace_name aws_s3_tracking_bucket_region pulsar_jwt_symmetric_key pulsar_jwt_proxy_admin_token pulsar_jwt_broker_admin_token pulsar_jwt_fw_admin_token pulsar_jwt_internal_admin_token pulsar_manager_admin_password tracking_sink_version tracking_sink_count segment_function_version segment_function_count datadog_global_processing_rules"
           filtered_vars=$(echo $vars | jq 'del(.[] | select(index($vars_to_remove) != null))')
           echo $filtered_vars | jq '.' > BDP/terraform/terraform.tfvars.json
-                     
-      - name: Terraform plan
-        if: ${{ github.event.inputs.action == 'plan' }}
-        needs: get_workspace
-        uses: ./.github/workflows/plan.yaml
-          with:
-            tf_workspace: ${{ needs.get_workspace.outputs.tf_workspace }}
-            common_vars_file: ./TDP/common_vars.json
-            tf_dir_path: ./TDP/AWS/terraform/${{ inputs.deployment_target }}
-            aws_role_session_name: gha-${{ needs.workspace.outputs.tf_workspace }}-deployTDP-${{ inputs.deployment_target }}
-        secrets: inherit
 
-      - name: Terraform 
+      - name: Terraform init and plan
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -128,50 +69,40 @@ jobs:
           terraform init -upgrade
           terraform workspace select ${{ vars.workspace_name }} || terraform workspace new ${{ vars.workspace_name }}
           terraform workspace show
+          terraform plan -input=false
 
       - name: Approval
         if: env.plan_status == 2
         uses: hmarr/auto-approve-action@v2
 
-      - name: Terraform apply
-        if: env.plan_status == 2
+      - name: Terraform apply/destroy
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
           cd BDP/terraform
-
-        if: ${{ inputs.terraform_operation == 'apply'}}; then
-          uses: HawkEyeInnovations/GithubSharedWorkflows/.github/workflows/terraform-apply.yml@v0.0.41
-          with:
-          working_directory: ${{ inputs.project }}/${{ inputs.stack }}
-          aws_region: ${{ inputs.aws_region }}
-          aws_account_id: ${{ inputs.bdp_workspace == 'dev-us' && '682352645723' || inputs.workspace == 'prod-us' && '682171097471' || inputs.workspace == 'prod' && '682171097471' || '682352645723' }}
-          aws_role_session_name: gha-apply-baseball-infra
-          var_file: ../${{ inputs.bdp_workspace }}.tfvars
-          workspace: ${{ inputs.bdp_workspace }}
-          auto_approve: true
-        secrets: inherit
-          ansible_hosts=$(terraform output -raw ansible-inventory)
-          echo "$ansible_hosts" > ../Pulsar/ansible/inventory/hosts
-          pulsar_service_url=$(terraform output -raw pulsar_public_nlb_broker_url)
-          pulsar_http_url=$(terraform output -raw pulsar_public_nlb_admin_url)
-        else
-         terraform destroy -auto-approve
+          if [[ "${{ github.event.inputs.action }}" == "apply" ]]; then
+            terraform apply -auto-approve
+            ansible_hosts=$(terraform output -raw ansible-inventory)
+            echo "$ansible_hosts" > ../Pulsar/ansible/inventory/hosts
+            pulsar_service_url=$(terraform output -raw pulsar_public_nlb_broker_url)
+            pulsar_http_url=$(terraform output -raw pulsar_public_nlb_admin_url)
+          else
+            terraform destroy -auto-approve
             terraform workspace select default
             terraform workspace delete ${{ vars.workspace_name }}
           fi
- 
-      - name: destroy Terraform
+
+      - name: Plan Terraform
         if: ${{ github.event.inputs.action == 'destroy' }}
         uses: HawkEyeInnovations/GithubSharedWorkflows/.github/workflows/terraform-plan.yml@v0.0.41
         with:
-          working_directory: ${{ github.event.inputs.project }}/${{ github.event.inputs.layer }}
-          aws_region: ${{ github.event.inputs.aws_region }}
-          aws_account_id: ${{ github.event.inputs.env == 'dev' && '682352645723' || github.event.inputs.env == 'prod' && '682171097471' || '682352645723' }}
+          working_directory: ${{ secrets.PROJECT }}/${{ secrets.STACK }}
+          aws_region: ${{ secrets.AWS_S3_EVENTS_BUCKET_REGION }}
+          aws_account_id: ${{ secrets.BDP_WORKSPACE == 'dev-us' && '682352645723' || secrets.BDP_WORKSPACE == 'prod-us' && '682171097471' || '682352645723' }}
           aws_role_session_name: gha-plan-baseball-infra
-          var_file: ../${{  inputs.bdp_workspace }}.tfvars
-          workspace: ${{  inputs.bdp_workspace }}
+          var_file: ../${{ github.event.inputs.bdp_workspace }}.tfvars
+          workspace: ${{ github.event.inputs.bdp_workspace }}
           create_workspace_if_not_exists: true
           run_checkov: true
           checkov_soft_fail: true
@@ -179,24 +110,24 @@ jobs:
           plan_options: ${{ github.event.inputs.action == 'destroy' && '-destroy -detailed-exitcode' || '' }}
         secrets: inherit
         continue-on-error: true
-      
+
       - name: Deploy Pulsar
-        if: github.event.inputs.deploy_pulsar == 'yes' && github.event.inputs.action == 'apply' && env.plan_status == 2
-        uses: HawkEyeInnovations/GithubSharedWorkflows/.github/workflows/deploy-pulsar.yml
+        if: ${{ github.event.inputs.deploy_pulsar == 'yes' && github.event.inputs.action == 'apply' && env.plan_status == 2 }}
+        uses: ./.github/actions/deploy-pulsar
         with:
-          tf_workspace: ${{ inputs.tf_workspace }}
-          ansible_dir: ${{ inputs.ansible_dir }}
-          ansible_hosts: ${{ steps.apply.outputs.ansible-inventory }}
-          pulsar_service_url: ${{ steps.apply.outputs.pulsar_broker_url }}
-          pulsar_http_url: ${{ steps.apply.outputs.pulsar_admin_url }}
-          pulsar_jwt_symmetric_key: ${{ steps.apply.outputs.pulsar_jwt_symmetric_key }}
-          pulsar_jwt_proxy_admin_token: ${{ steps.apply.outputs.pulsar_jwt_proxy_admin_token }}
-          pulsar_jwt_broker_admin_token: ${{ steps.apply.outputs.pulsar_jwt_broker_admin_token }}
-          pulsar_jwt_fw_admin_token: ${{ steps.apply.outputs.pulsar_jwt_fw_admin_token }}
-          pulsar_jwt_internal_admin_token: ${{ steps.apply.outputs.pulsar_jwt_internal_admin_token }}
-          pulsar_jwt_tdp_admin_token: ${{ steps.apply.outputs.pulsar_jwt_tdp_admin_token }}
-          pulsar_manager_admin_password: ${{ steps.apply.outputs.pulsar_manager_admin_password }}
-          datadog_api_key: ${{ steps.apply.outputs.datadog_api_key }}
+          tf_workspace: ${{ github.event.inputs.bdp_workspace }}
+          ansible_dir: ${{ secrets.ANSIBLE_DIR }}
+          ansible_hosts: ${{ secrets.ANSIBLE_HOSTS }}
+          pulsar_service_url: ${{ secrets.PULSAR_SERVICE_URL }}
+          pulsar_http_url: ${{ secrets.PULSAR_HTTP_URL }}
+          pulsar_jwt_symmetric_key: ${{ secrets.PULSAR_JWT_SYMMETRIC_KEY }}
+          pulsar_jwt_proxy_admin_token: ${{ secrets.PULSAR_JWT_PROXY_ADMIN_TOKEN }}
+          pulsar_jwt_broker_admin_token: ${{ secrets.PULSAR_JWT_BROKER_ADMIN_TOKEN }}
+          pulsar_jwt_fw_admin_token: ${{ secrets.PULSAR_JWT_FW_ADMIN_TOKEN }}
+          pulsar_jwt_internal_admin_token: ${{ secrets.PULSAR_JWT_INTERNAL_ADMIN_TOKEN }}
+          pulsar_jwt_tdp_admin_token: ${{ secrets.PULSAR_JWT_TDP_ADMIN_TOKEN }}
+          pulsar_manager_admin_password: ${{ secrets.PULSAR_MANAGER_ADMIN_PASSWORD }}
+          datadog_api_key: ${{ secrets.DATADOG_API_KEY }}
           ec2_ssh_key: ${{ secrets.EC2_SSH_KEY }}
 
       - name: Notify Slack (Success)
@@ -205,7 +136,7 @@ jobs:
         with:
           webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
           message: "Successful: Job '${{ github.event_name }} [${{ github.run_number }}]' to '${{ github.event.inputs.action }}' (${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
-          color: "#00ff48"
+          
 
       - name: Notify Slack (Failure)
         if: failure()
@@ -213,4 +144,4 @@ jobs:
         with:
           webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
           message: "Failed: Job '${{ github.event_name }} [${{ github.run_number }}]' to '${{ github.event.inputs.action }}' (${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
-          color: "#f20000"
+          
