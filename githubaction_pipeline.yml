@@ -113,7 +113,7 @@ jobs:
 
       - name: Deploy Pulsar
         if: ${{ github.event.inputs.deploy_pulsar == 'yes' && github.event.inputs.action == 'apply' && env.plan_status == 2 }}
-        uses: ./.github/actions/deploy-pulsar
+        uses: HawkEyeInnovations/GithubSharedWorkflows/.github/workflows/deploy-pulsar.yml
         with:
           tf_workspace: ${{ github.event.inputs.bdp_workspace }}
           ansible_dir: ${{ secrets.ANSIBLE_DIR }}
