@@ -64,7 +64,7 @@ jobs:
       - name: Terraform Plan
         if: ${{ github.event.inputs.action == 'plan' }}
         needs: get_workspace
-        uses: ./.github/workflows/plan.yaml
+        uses: HawkEyeInnovations/GithubSharedWorkflows/.github/workflows/plan.yaml
           with:
             tf_workspace: ${{ needs.get_workspace.outputs.tf_workspace }}
             common_vars_file: ./TDP/common_vars.json
